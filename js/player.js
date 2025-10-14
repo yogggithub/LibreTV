@@ -1,6 +1,13 @@
 const selectedAPIs = JSON.parse(localStorage.getItem('selectedAPIs') || '[]');
 const customAPIs = JSON.parse(localStorage.getItem('customAPIs') || '[]'); // 存储自定义API列表
 
+// 跳过片头片尾
+let skipIntroDuration = 90; // 默认跳过90秒片头
+let skipEndingDuration = 90; // 默认跳过90秒片尾
+let skipEnabled = true; // 是否启用跳过功能
+let skipIntroButton = null; // 跳过片头按钮实例
+let skipEndingButton = null; // 跳过片尾按钮实例
+
 // 改进返回功能
 function goBack(event) {
     // 防止默认链接行为
@@ -124,6 +131,12 @@ function initializePageContent() {
     let index = parseInt(urlParams.get('index') || '0');
     const episodesList = urlParams.get('episodes'); // 从URL获取集数信息
     const savedPosition = parseInt(urlParams.get('position') || '0'); // 获取保存的播放位置
+
+    // 跳过片头片尾
+    skipEnabled = localStorage.getItem('skipEnabled') !== 'false';
+    skipIntroDuration = parseInt(localStorage.getItem('skipIntroDuration')) || 90;
+    skipEndingDuration = parseInt(localStorage.getItem('skipEndingDuration')) || 90;
+
     // 解决历史记录问题：检查URL是否是player.html开头的链接
     // 如果是，说明这是历史记录重定向，需要解析真实的视频URL
     if (videoUrl && videoUrl.includes('player.html')) {
@@ -471,6 +484,47 @@ function initPlayer(videoUrl) {
         moreVideoAttr: {
             crossOrigin: 'anonymous',
         },
+
+        // 跳过片头片尾
+        settings: [
+            // 添加跳过功能设置
+            {
+                html: '跳过片头片尾',
+                tooltip: skipEnabled ? '开' : '关',
+                switch: skipEnabled,
+                onSwitch: function (item) {
+                    skipEnabled = !skipEnabled;
+                    item.switch = skipEnabled;
+                    item.tooltip = skipEnabled ? '开' : '关';
+                    localStorage.setItem('skipEnabled', skipEnabled);
+                    return true;
+                },
+            },
+            {
+                html: '片头时长(秒)',
+                tooltip: skipIntroDuration,
+                onInput: function (item, event) {
+                    const value = parseInt(event.target.value);
+                    if (!isNaN(value)) {
+                        skipIntroDuration = value;
+                        item.tooltip = value;
+                        localStorage.setItem('skipIntroDuration', value);
+                    }
+                },
+            },
+            {
+                html: '片尾时长(秒)',
+                tooltip: skipEndingDuration,
+                onInput: function (item, event) {
+                    const value = parseInt(event.target.value);
+                    if (!isNaN(value)) {
+                        skipEndingDuration = value;
+                        item.tooltip = value;
+                        localStorage.setItem('skipEndingDuration', value);
+                    }
+                },
+            },
+        ],
         customType: {
             m3u8: function (video, url) {
                 // 清理之前的HLS实例
@@ -636,6 +690,33 @@ function initPlayer(videoUrl) {
 
     // 播放器加载完成后初始隐藏工具栏
     art.on('ready', () => {
+        
+        // 创建跳过片头按钮
+        skipIntroButton = art.controls.add({
+            position: 'right',
+            html: '<svg width="24" height="24" viewBox="0 0 24 24"><path fill="currentColor" d="M8,5.14V19.14L19,12.14L8,5.14Z"/></svg>',
+            tooltip: '跳过片头',
+            style: {padding: '0 10px'},
+            click: function () {
+                if (art && art.video) {
+                    art.currentTime = Math.min(art.currentTime + skipIntroDuration, art.duration - 1);
+                }
+            }
+        });
+        
+        // 创建跳过片尾按钮
+        skipEndingButton = art.controls.add({
+            position: 'right',
+            html: '<svg width="24" height="24" viewBox="0 0 24 24"><path fill="currentColor" d="M6,18L14.5,12L6,6V18ZM16,6V18H18V6H16Z"/></svg>',
+            tooltip: '跳过片尾',
+            style: {padding: '0 10px'},
+            click: function () {
+                if (art && art.video && autoplayEnabled && currentEpisodeIndex < currentEpisodes.length - 1) {
+                    playNextEpisode();
+                }
+            }
+        });
+
         hideControls();
     });
 
@@ -710,6 +791,43 @@ function initPlayer(videoUrl) {
     // 添加移动端长按三倍速播放功能
     setupLongPressSpeedControl();
 
+    // 在timeupdate事件中添加自动跳过逻辑
+    art.on('video:timeupdate', function() {
+        const currentTime = art.currentTime;
+        const duration = art.duration;
+        
+        // 自动跳过片头
+        if (skipEnabled && currentTime < skipIntroDuration) {
+            // 显示提示（只在片头区间显示）
+            if (currentTime > 5 && currentTime < skipIntroDuration - 5) {
+                art.notice.show(`自动跳过片头 (${Math.floor(skipIntroDuration - currentTime)}秒)`);
+            }
+            art.currentTime = skipIntroDuration;
+        }
+        
+        // 自动跳过片尾（提前5秒触发）
+        if (skipEnabled && duration > 0 && autoplayEnabled && 
+            currentTime > duration - skipEndingDuration && 
+            currentTime < duration - 5 && 
+            !videoHasEnded &&
+            currentEpisodeIndex < currentEpisodes.length - 1) {
+            art.notice.show(`自动跳过片尾，播放下一集`);
+            playNextEpisode();
+        }
+        
+        // 控制跳过按钮的可见性
+        if (skipIntroButton) {
+            skipIntroButton.$el.style.display = (currentTime > 10 && currentTime < duration - skipIntroDuration - 30) ? 'block' : 'none';
+        }
+        if (skipEndingButton) {
+            const showEndingButton = autoplayEnabled && 
+                currentTime > duration - skipEndingDuration - 30 && 
+                currentTime < duration - 10 &&
+                currentEpisodeIndex < currentEpisodes.length - 1;
+            skipEndingButton.$el.style.display = showEndingButton ? 'block' : 'none';
+        }
+    });
+
     // 视频播放结束事件
     art.on('video:ended', function () {
         videoHasEnded = true;
@@ -727,6 +845,10 @@ function initPlayer(videoUrl) {
         } else {
             art.fullscreen = false;
         }
+
+        // 在播放结束时隐藏跳过按钮
+        if (skipIntroButton) skipIntroButton.$el.style.display = 'none';
+        if (skipEndingButton) skipEndingButton.$el.style.display = 'none';
     });
 
     // 添加双击全屏支持
